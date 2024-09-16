@@ -6,3 +6,4 @@ windows
 uv.lock
 *.egg-info
 .vscode
+roder_all.py
