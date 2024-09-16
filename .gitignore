@@ -1,0 +1,8 @@
+dist
+.venv
+.env
+__pycache__
+windows
+uv.lock
+*.egg-info
+.vscode

@@ -1,0 +1,3 @@
+pyarrow
+deltalake
+pyarrow-stubs
