@@ -32,6 +32,7 @@ def rorder(
     dt: DeltaTable,
     partition: tuple[str, str, str | int | float],
     min_commit_interval: int | timedelta | None = None,
+    max_file_size_bytes: int | None = None,
     pyarrow_writer_properties: dict[str, Any] | None = None,
     custom_metadata: dict[str, str] | None = None,
     sort_by: str | None = None,
