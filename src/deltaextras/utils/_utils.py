@@ -13,12 +13,20 @@ from pyarrow import compute as pc
 
 if TYPE_CHECKING:
     import pyarrow.parquet as pq
-    from fsspec.spec import AbstractFileSystem
+    from fsspec import AbstractFileSystem
     from pyarrow import Array, RecordBatch
 
 
 class Conflict(Exception):
     """Error when a file being compacted was removed by a subsequent operation."""
+
+
+class InvalidSort(Exception):
+    """sort_by parameter is invalid."""
+
+
+class NonReduntantDupes(Exception):
+    """When getting rid of duplicates, if there are dupes that have different values."""
 
 
 try:
@@ -116,7 +124,7 @@ def _make_commit_entry(
     numBatches: int,
     readVersion: int,
     partition: tuple[str, str, str | int | float],
-):
+) -> dict[str, Any]:
     size_array = cast(NumericArray, partition_batch["size_bytes"])
 
     filesAdded = {
@@ -271,7 +279,7 @@ def _big_small(
     return (_paarray_to_str_list(big), _paarray_to_str_list(small))
 
 
-def _find_next_log(version: int, log_dir: str, fs: AbstractFileSystem):
+def _find_next_log(version: int, log_dir: str, fs: AbstractFileSystem) -> int:
     # This function could be async for faster file checking. If the version
     # is low enough it could assume that there aren't a lot of files and then ls
     # the dir instead of checking every file number
@@ -330,14 +338,14 @@ def _check_intermediate_logs_for_conflicts(
 
 
 __all__ = [
-    "_make_remove_entry",
+    "_big_small",
+    "_check_intermediate_logs_for_conflicts",
+    "_find_next_log",
+    "_get_fs_and_dir",
     "_make_add_entry",
     "_make_commit_entry",
-    "_safe_val",
-    "_get_fs_and_dir",
     "_make_part_batch",
-    "_find_next_log",
+    "_make_remove_entry",
     "_paarray_to_str_list",
-    "_check_intermediate_logs_for_conflicts",
-    "_big_small",
+    "_safe_val",
 ]

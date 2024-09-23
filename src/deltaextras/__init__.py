@@ -11,7 +11,7 @@ import pyarrow.parquet as pq
 from pyarrow import Array, Table, concat_tables
 from pyarrow import compute as pc
 
-from deltaextras._utils import (
+from deltaextras.utils._utils import (
     _big_small,
     _check_intermediate_logs_for_conflicts,
     _find_next_log,
@@ -21,11 +21,19 @@ from deltaextras._utils import (
     _make_part_batch,
     _make_remove_entry,
 )
+from deltaextras.utils.sortunique import (
+    _sort_by_fixer,
+    _unique_by,
+)
 
 if TYPE_CHECKING:
     from datetime import timedelta
 
     from deltalake import DeltaTable
+
+    from deltaextras.utils.sortunique import (
+        Order,
+    )
 
 
 def rorder(
@@ -35,7 +43,8 @@ def rorder(
     max_file_size_bytes: int | None = None,
     pyarrow_writer_properties: dict[str, Any] | None = None,
     custom_metadata: dict[str, str] | None = None,
-    sort_by: str | None = None,
+    sort_by: list[str] | str | list[tuple[str, Order]] | None = None,
+    unique_by: list[str] | str | None = None,
     max_materialize_size: int = 1_000_000,
     max_total_size: int = 5_000_000,
 ):
@@ -120,18 +129,6 @@ def rorder(
         if not all(x[0] == x[1] for x in rg_range):
             rg_ranges[i] = rg_range
 
-    def old_iterator():
-        pass
-        # i = -1
-        # for i, batch in enumerate(scan_entries.to_batches()):
-        #     unique_entries = pc.unique(
-        #         concat_arrays([unique_entries, batch[target_column]])
-        #     ).sort()
-        # numBatches = i + 1
-        # TODO: check files' stats to see if row groups are sufficient to give unique
-        # values
-        # if they are then can iterate across row groups instead of dataset batches
-
     potentials = []
     if (x := pc.min(unique_entries).as_py()) is not None:
         potentials.append(x)
@@ -170,8 +167,12 @@ def rorder(
             )
             range_cache = range_cache.filter(pc.field(target_column) != current_entry)
         entry_tbl = concat_tables(entry_tbl)
+        if unique_by is not None:
+            entry_tbl = _unique_by(entry_tbl, unique_by)
         if sort_by is not None:
-            entry_tbl = entry_tbl.sort_by([(sort_by, "ascending")])
+            sort_by = _sort_by_fixer(sort_by)
+            entry_tbl = entry_tbl.sort_by(sort_by)
+        entry_tbl = entry_tbl.select(schema.names)
         new_pq_file.write(entry_tbl)
         potentials = []
         if (
