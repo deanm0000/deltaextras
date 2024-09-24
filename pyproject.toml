@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "deltaextra"
-version="0.0.01"
+version="0.0.02"
 authors=[
     { name="Dean MacGregor", email="powertrading121@gmail.com"}
 ]
