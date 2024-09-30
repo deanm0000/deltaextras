@@ -4,7 +4,7 @@ import importlib.metadata
 import json
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, TypeAlias, TypedDict, cast
 
 import pyarrow as pa
 from fsspec import filesystem
@@ -15,6 +15,16 @@ if TYPE_CHECKING:
     import pyarrow.parquet as pq
     from fsspec import AbstractFileSystem
     from pyarrow import Array, RecordBatch
+
+Remove: TypeAlias = Literal["remove"]
+
+
+class RemoveLog(TypedDict):
+    path: str
+    dataChange: bool
+    deletionTimestamp: int
+    partitionValues: dict[str, str]
+    size: int
 
 
 class Conflict(Exception):
@@ -49,7 +59,7 @@ def _make_remove_entry(
     batch: RecordBatch,
     partition: tuple[str, str, str | int | float],
     remove_time: int,
-):
+) -> dict[Remove, RemoveLog]:
     filepath = batch["path"][0].as_py()
     size = batch["size_bytes"][0].as_py()
     return {
@@ -61,6 +71,30 @@ def _make_remove_entry(
             "size": size,
         }
     }
+
+
+def _make_remove_entry2(
+    fs: AbstractFileSystem,
+    root_dir: str,
+    files: list[tuple[str, int]],
+    partition: list[str],
+) -> list[dict[Remove, RemoveLog]]:
+    remove_time = int(datetime.now(tz=timezone.utc).timestamp() * 1000)
+    return_list: list[dict[Remove, RemoveLog]] = []
+
+    for one_file in files:
+        return_list.append(
+            {
+                "remove": {
+                    "path": one_file[0],
+                    "dataChange": False,
+                    "deletionTimestamp": remove_time,
+                    "partitionValues": {partition[0]: str(partition[1])},
+                    "size": one_file[1],
+                }
+            }
+        )
+    return return_list
 
 
 def _make_add_entry(
@@ -165,6 +199,57 @@ def _make_commit_entry(
     }
 
 
+def _make_commit_entry2(
+    write_time: int,
+    new_file_size: int,
+    remove_entries: list[dict[Remove, RemoveLog]],
+    numBatches: int,
+    readVersion: int,
+    partition: tuple[str, str, str | int | float],
+) -> dict[str, Any]:
+    remove_sizes = [
+        x["remove"]["size"] for x in remove_entries if x["remove"]["size"] is not None
+    ]
+    sum_remove_size = sum(remove_sizes)
+    len_remove_size = len(remove_sizes)
+    filesAdded = {
+        "avg": float(new_file_size),
+        "max": new_file_size,
+        "min": new_file_size,
+        "totalFiles": 1,
+        "totalSize": new_file_size,
+    }
+    filesRemoved = {
+        "avg": sum_remove_size / len_remove_size,
+        "max": max(remove_sizes),
+        "min": min(remove_sizes),
+        "totalFiles": len_remove_size,
+        "totalSize": sum_remove_size,
+    }
+
+    predicate = json.dumps([f"{partition[0]} = '{partition[2]}'"])
+    return {
+        "commitInfo": {
+            "timestamp": write_time,
+            "operation": "OPTIMIZE",
+            "operationParameters": {"predicate": predicate},
+            "operationMetrics": {
+                "filesAdded": json.dumps(filesAdded),
+                "filesRemoved": json.dumps(filesRemoved),
+                "numBatches": numBatches,
+                "numFilesAdded": 1,
+                "numFilesRemoved": len_remove_size,
+                "partitionsOptimized": 0,
+                "preserveInsertionOrder": True,
+                "totalConsideredFiles": len_remove_size,
+                "totalFilesSkipped": 0,
+            },
+            "clientVersion": f"deltaextras{__version__}",
+            "readVersion": readVersion,
+        }
+    }
+
+
 def _safe_val(x: str | int | datetime | date | None) -> str | int | None:
     if isinstance(x, datetime | date):
         return x.isoformat()
@@ -225,6 +310,22 @@ def _make_filter_expr(
     time_cutoff = time_cutoff.replace(tzinfo=None)
     time_filter: pc.Expression = pc.field("modification_time") >= time_cutoff
     return part_filter & time_filter
+
+
+def _get_time_cutoff(
+    min_commit_interval: int | timedelta | None = None,
+) -> datetime | None:
+    if min_commit_interval is None or (
+        isinstance(min_commit_interval, int) and min_commit_interval == 0
+    ):
+        time_cutoff = None
+    elif isinstance(min_commit_interval, timedelta):
+        time_cutoff = datetime.now(tz=timezone.utc) - min_commit_interval
+    else:
+        time_cutoff = datetime.now(tz=timezone.utc) - timedelta(
+            seconds=min_commit_interval
+        )
+    return time_cutoff
 
 
 def _make_part_batch(
@@ -301,7 +402,7 @@ def _find_next_log(version: int, log_dir: str, fs: AbstractFileSystem) -> int:
     #     i+=1
     # in 2.8s it can only check for 21 exists, may need async
     i = version
-    while fs.exists(f"{log_dir}{i:020d}.json"):
+    while fs.exists(f"{log_dir}/{i:020d}.json"):
         i += 1
     return i
 
@@ -316,11 +417,11 @@ def _check_intermediate_logs_for_conflicts(
     start_i: int,
     last_i_plus_1: int,
     log_dir: str,
-    partition_batch: RecordBatch,
+    files_array: StringArray,
     fs: AbstractFileSystem,
 ) -> None:
     for i in range(start_i, last_i_plus_1):
-        with fs.open(f"{log_dir}{i:020}.json", "r") as f:
+        with fs.open(f"{log_dir}/{i:020}.json", "r") as f:
             log = f.read()
             if log is not None:
                 assert isinstance(log, str)
@@ -329,23 +430,17 @@ def _check_intermediate_logs_for_conflicts(
                     if (
                         "remove" in entry_dict
                         and "path" in entry_dict["remove"]
-                        and pc.is_in(
-                            entry_dict["remove"]["path"], partition_batch["path"]
-                        ).as_py()
+                        and pc.is_in(entry_dict["remove"]["path"], files_array).as_py()
                     ):
                         msg = f"{entry_dict['remove']['path']} was removed by {i:020}.json"
                         raise Conflict(msg)
 
 
 __all__ = [
-    "_big_small",
     "_check_intermediate_logs_for_conflicts",
     "_find_next_log",
-    "_get_fs_and_dir",
+    "_get_time_cutoff",
     "_make_add_entry",
-    "_make_commit_entry",
-    "_make_part_batch",
-    "_make_remove_entry",
-    "_paarray_to_str_list",
-    "_safe_val",
+    "_make_commit_entry2",
+    "_make_remove_entry2",
 ]
